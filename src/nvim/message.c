@@ -1121,12 +1121,98 @@ char_u *msg_outtrans_one(char_u *p, int attr)
 
 int msg_outtrans_len_attr(char_u *msgstr, int len, int attr)
 {
+  return msg_outtrans_len_attr_regex(msgstr, len, attr, 0);
+}
+
+char_u *match_token(char_u *str, int len, int whacked, char_u grid[][16])
+{
+  int gridlen;
+  int i = -1;
+  while (grid[++i][0] != NUL) {
+    gridlen = (int)STRLEN(grid[i]+1);
+    if (whacked && grid[i][1] != '\\')
+      continue;
+    if (len+1 < gridlen)
+      continue;
+    if (strncmp((char *)str, (char *)grid[i]+1, gridlen))
+      continue;
+    return grid[i];
+  }
+  return NULL;
+}
+
+int msg_outtrans_len_attr_regex(char_u *msgstr, int len, int attr, int regex)
+{
   int retval = 0;
   char_u      *str = msgstr;
   char_u      *plain_start = msgstr;
   char_u      *s;
   int mb_l;
   int c;
+  int attr2 = attr;
+  int attr3 = attr;
+  int whacked = 0;
+  int state = 'N'; // Normal, Bracketted, Slashed
+
+  char_u grid_n[][16] = {
+    /* ascii escapes */
+    "a\\e","a\\t","a\\r","a\\b","a\\n","a\\\\",
+    /* backrefs */
+    "b\\1","b\\2","b\\3","b\\4","b\\5","b\\6","b\\7","b\\8","b\\9",
+    /* sensitivity & similar */
+    "s\\c","s\\C","s\\m","s\\M","s\\v","s\\V","s\\Z",
+    /* numeric repitition */
+    "n\\{",   /* ends with \{ or }" */
+    /* multi */
+    "m*","m\\+","m\\=","m\\?",
+    /* look-around */
+    "l\\@>","l\\@=","l\\@!","l\\@<=","l\\@<!",
+    /* regex typical */
+    "r\\(","r\\%(","r\\)","r.","r\\_.","r~",
+    "r\\_^","r\\_$","r\\<","r\\>","r\\zs","r\\ze",
+    /* weird Vim stuff */
+    "w\\%^","w\\%$","w\\%V","w\\%#","w\\%'m","w\\%<'m","w\\%>'m",
+    /* partial matching   e.g. fun\%[ction] */
+    "p\\%[",
+    /* brackets */
+    "[\\_[^]","[\\_[^","[\\_[]","[\\_[",
+    "[[^]",   "[[^",   "[[]",   "[[",
+    /* unicode, etc */
+    "u\\%d","u\\%o","u\\%x","u\\%u","u\\%U",
+    /* end of pattern */
+    "//",
+    /* char classes */
+    "c\\i","c\\I","c\\k","c\\K","c\\f","c\\F","c\\p","c\\P","c\\s","c\\S",
+    "c\\d","c\\D","c\\x","c\\X","c\\o","c\\O","c\\w","c\\W","c\\h","c\\H",
+    "c\\a","c\\A","c\\l","c\\L","c\\u","c\\U",
+    /* SKIPPED:   ^ $ \%23l \%23v \%23c   */
+    ""
+  };
+
+  char_u grid_b[][16] = {
+    /* escapables */
+    "e\\b","e\\d","e\\e","e\\r","e\\t","e\\n","e\\o","e\\U","e\\u","e\\x",
+    "e\\\\",
+    /* character class groups */
+    "g[:alnum:]","g[:alpha:]","g[:blank:]","g[:cntrl:]","g[:digit:]",
+    "g[:graph:]","g[:lower:]","g[:print:]","g[:punct:]","g[:space:]",
+    "g[:upper:]","g[:xdigit:]","g[:return:]","g[:tab:]","g[:escape:]",
+    "g[:backspace:]",
+    /* end of collection */
+    "]]",
+    /* SKIPPED: equivalence classes: [=a=] and collation elements: [.a.] */
+    /* SKIPPED: \^ \] \- (these look fine by default) */
+    ""
+  };
+
+  char_u grid_s[][16] = {
+    /* offsets */
+    "o+","o-","oe","os","ob",
+    /* another search */
+    ";;",
+    /* SKIPPED: offset numbers */
+    ""
+  };
 
   /* if MSG_HIST flag set, add message to history */
   if (attr & MSG_HIST) {
@@ -1169,25 +1255,72 @@ int msg_outtrans_len_attr(char_u *msgstr, int len, int attr)
       len -= mb_l - 1;
       str += mb_l;
     } else {
+      char_u tokentype = '\0';
+      int tokenlen = 1;
+      int consumed = 1;
       s = transchar_byte(*str);
+
       if (s[1] != NUL) {
+        tokenlen = (int)STRLEN(s);
+        tokentype = '^';
+      } else {
+        char_u *token = match_token(str, len, whacked,
+              state == 'N' ? grid_n
+            : state == 'B' ? grid_b
+            :                grid_s);
+        if (token) {
+          s = token + 1;
+          tokenlen = STRLEN(s);
+          tokentype = token[0];
+          consumed = tokenlen;
+        }
+      }
+
+      whacked = !tokentype && *str == '\\';
+      if (whacked)
+        tokentype = '\\';
+
+      if (!whacked && !tokentype && state == 'B')
+        tokentype = 'B';
+
+      if (tokentype) {
         /* unprintable char: print the printable chars so far and the
          * translation of the unprintable char. */
         if (str > plain_start)
           msg_puts_attr_len(plain_start, (int)(str - plain_start),
-              attr);
-        plain_start = str + 1;
-        msg_puts_attr(s, attr == 0 ? hl_attr(HLF_8) : attr);
-        retval += (int)STRLEN(s);
-      } else
-        ++retval;
-      ++str;
+              attr2);
+        plain_start = str + consumed;
+
+        if      (strchr("^au",      tokentype))
+          attr3 = hl_attr(HLF_8);
+        else if (strchr("nmlr/[]o", tokentype))
+          attr3 = hl_attr(HLF_REGEX);
+        else if (strchr("cB",       tokentype))
+          attr3 = hl_attr(HLF_REGCL);
+        else if (strchr("bpsw\\eg;",tokentype))
+          attr3 = hl_attr(HLF_REGWK);
+        else
+          attr3 = attr2;
+
+        msg_puts_attr(s, attr3);
+
+        if (state == 'N' && tokentype == '[') // opening [ or \_[
+          state = 'B';
+        else if (tokentype == '/') // ending slash or qmark
+          state = 'S';
+        else if (state =='B' && tokentype == ']')
+          state = 'N';
+      }
+
+      retval += tokenlen;
+      str += consumed;
+      len -= consumed - 1;
     }
   }
 
   if (str > plain_start)
     /* print the printable chars at the end */
-    msg_puts_attr_len(plain_start, (int)(str - plain_start), attr);
+    msg_puts_attr_len(plain_start, (int)(str - plain_start), attr2);
 
   return retval;
 }

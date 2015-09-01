@@ -5800,6 +5800,9 @@ static char *highlight_init_light[] =
   "Title        ctermfg=DarkMagenta gui=bold guifg=Magenta",
   "Visual       guibg=LightGrey",
   "WarningMsg   ctermfg=DarkRed guifg=Red",
+  "RegexSpecial ctermfg=Blue guifg=Blue",
+  "RegexClass   ctermfg=Yellow guifg=Yellow",
+  "RegexWhack   ctermfg=Gray guifg=Gray",
   NULL
 };
 
